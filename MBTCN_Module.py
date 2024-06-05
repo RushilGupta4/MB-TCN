@@ -116,11 +116,15 @@ class MultiBranchingLayer(nn.Module):
                 y0 = branch(x)
                 y = self.softmax(y0.unsqueeze(0)).squeeze(0)
                 out.append(y)
+
             else:
                 with torch.no_grad():
                     y0 = branch(x)
                     y = self.softmax(y0.unsqueeze(0)).squeeze(0)
                     out.append(y)
+
+        out = torch.stack(out)
+        out = torch.softmax(out, dim=-1)
 
         return out
 

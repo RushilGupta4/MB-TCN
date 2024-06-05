@@ -1,229 +1,116 @@
-import torch
-from torch.nn.utils.rnn import pad_sequence
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
+import torch
+from torch.utils.data import Dataset
 import pandas as pd
-from sklearn.model_selection import train_test_split
-import random
-import time
-import os
 
 
-# In[ ]:
+class PatientDataset(Dataset):
+    def __init__(self, data_list):
+        self.data_list = data_list
+
+    def __len__(self):
+        return len(self.data_list)
+
+    def __getitem__(self, index):
+        # Retrieve data for a single patient indexed by `index`.
+        data = self.data_list[index]
+        patient_id = data["ID"]
+
+        # Convert data into tensors and reshape for TCN input requirements.
+        masks = torch.tensor(data["Mask"], dtype=torch.float32).transpose(0, 1)
+        values = torch.tensor(data["Value"], dtype=torch.float32).transpose(0, 1)
+        label = torch.tensor(data["Label"], dtype=torch.int32)
+        # label = torch.argmax(label, dim=-1)
+        times = torch.tensor(data["Times"], dtype=torch.float32)
+
+        return {
+            "ID": patient_id,
+            "Mask": masks,
+            "Value": values,
+            "Label": label,
+            "Times": times,
+        }
 
 
-def load_data_list(train_set, test_set):
+def load_data(column: str):
     """
     download data and save as list format, each element in list is a dataframe
 
     Args:
-    train_set: training dataset, 20,336 patients with 1,790 positive
-    test_set:  test dataset, 20,000 patients with 1,142 positive
-
-    return: training samples list, test samples list
-
-    """
-    doc_names = os.listdir(train_set)
-    doc_names2 = os.listdir(test_set)
-    list_A = list()
-    list_B = list()
-
-    doc_names, doc_names2 = doc_names[1000:1500], doc_names2[1500:2000]
-
-    for i in doc_names:
-        doc_unit = pd.read_csv(train_set + i, delimiter="|")
-        list_A.append(doc_unit)
-    for i in doc_names2:
-        doc_unit = pd.read_csv(test_set + i, delimiter="|")
-        list_B.append(doc_unit)
-
-    return list_A, list_B
-
-
-# create missing value mask matrix
-def missing_mask_matrix(list1, list2):
-    """
-    create training and test missingness mask without label column,
-    set 0 for missing value, 1 for non-missing value
-
-        Args:
-        list1: training samples list
-        list2:  test samples list
-
-        return:  training mask list, test mask list
+    column: The label column to use for classification
 
     """
 
-    mask_A = list()
-    mask_B = list()
+    df = pd.read_parquet("../ckpt5_zscore_cut.parquet")
 
-    for i in list1:
-        m = i.notna().astype("int")
-        mask_A.append(m.drop(m.columns[len(m.columns) - 1], axis=1))
-    for j in list2:
-        n = j.notna().astype("int")
-        mask_B.append(n.drop(n.columns[len(n.columns) - 1], axis=1))
+    # Since 200 > 30 => no death
+    df["death_time"] = pd.to_timedelta(df["death_time"]).fillna(pd.Timedelta(days=200))
+    df["death_time"] = df["death_time"].dt.total_seconds() / 3600
+    ids = df["ID"].unique()
 
-    for i in range(len(mask_A)):
-        mask_A[i] = np.array(mask_A[i])
+    split1 = int(len(ids) * 0.7)
+    split2 = int(len(ids) * 0.8)
 
-    for j in range(len(mask_B)):
-        mask_B[j] = np.array(mask_B[j])
+    train = ids[:split1]
+    val = ids[split1:split2]
+    test = ids[split2:]
 
-    return mask_A, mask_B
+    train_df = df[df["ID"].isin(train)]
+    val_df = df[df["ID"].isin(val)]
+    test_df = df[df["ID"].isin(test)]
 
+    data = {}
 
-def fill_nan(list1, list2):
-    """
-    impute missing value,
-    for each set of missing indices, use the value of one row before(same column).
-    in the case that the missing value is the first row, look one row ahead instead,
-    if all missing value in one column, replace missing value with 0
-
-        Args:
-        list1: training samples list
-        list2:  test samples list
-
-        return: imputed training samples list, imputed test samples list
-    """
-    for i in list1:
-        i = i.ffill()
-        i = i.bfill()
-        i = i.fillna(0)
-
-    for j in list2:
-        j = j.ffill()
-        j = j.bfill()
-        j = j.fillna(0)
-
-    return list1, list2
-
-
-# split predictor and response from list
-def split_predictor_response(train_list, test_list):
-    """
-    split predictor and response from list
-
-        Args:
-        train_list: training samples list
-        test_list:  test samples list
-
-        return: A_predictors, B_predictors, A_label_np, B_label_np
-
-    """
-
-    train_list1 = list()
-    test_list1 = list()
-
-    A_predictors = list()
-    A_response = list()
-    B_predictors = list()
-    B_response = list()
-
-    # convert into np.array
-    for i in range(len(train_list)):
-        train_list1.append(np.array(train_list[i]))
-
-    for j in range(len(test_list)):
-        test_list1.append(np.array(test_list[j]))
-
-    # split predictors and label
-    for i in train_list1:
-        A_predictors.append(i[:, : i.shape[1] - 1])
-        A_response.append(i[:, -1])
-    for j in test_list1:
-        B_predictors.append(j[:, : j.shape[1] - 1])
-        B_response.append(j[:, -1])
-
-    # set label for every sample
-    A_label = len(A_response) * [0]
-    for i in range(len(A_response)):
-        if 1 in A_response[i]:
-            A_label[i] = 1
-
-    B_label = len(B_response) * [0]
-    for i in range(len(B_response)):
-        if 1 in B_response[i]:
-            B_label[i] = 1
-
-    A_label_np = np.array(A_label)
-    B_label_np = np.array(B_label)
-
-    return A_predictors, B_predictors, A_label_np, B_label_np
-
-
-def get_index(label):
-    """
-    return sepsis and non-sepsis sample indice
-
-        Args:
-        label: sample label
-
-
-        return: sepsis_index_np, nonsepsis_index_np
-
-    """
-
-    sepsis_index_list = list()
-    nonsepsis_index_list = list()
-    for i in range(len(label)):
-        if label[i] == 1:
-            sepsis_index_list.append(i)
+    for i, df in {"train": train_df, "val": val_df, "test": test_df}.items():
+        # Binning and one-hot encoding for each DataFrame split
+        if column == "los":
+            bins = [0, 48, 168, 720, float("inf")]
+            labels = [0, 1, 2, 3]
+            binned = pd.cut(df[column], bins=bins, labels=labels, right=False)
+        elif column == "death_time":
+            # Adjust binning to handle 'no death' as a separate category
+            bins = [0, 48, 168, 720, float("inf")]
+            labels = [0, 1, 2, 3]
+            binned = pd.cut(df[column], bins=bins, labels=labels, right=False)
         else:
-            nonsepsis_index_list.append(i)
+            raise ValueError(f"Invalid column: {column}")
 
-    sepsis_index_np = np.array(sepsis_index_list)
-    nonsepsis_index_np = np.array(nonsepsis_index_list)
+        df = df.drop(columns=["death_time", "los"])
+        encoded = pd.get_dummies(binned, prefix="y").astype(int)
+        df = pd.concat([df, encoded], axis=1)
 
-    return sepsis_index_np, nonsepsis_index_np
+        patient_data = []
+        for id, sub_df in df.groupby("ID"):
+            max_length = 49
+            mask = np.pad(
+                sub_df[[c for c in sub_df.columns if c.startswith("Mask_")]].values,
+                ((0, max_length - len(sub_df)), (0, 0)),
+                mode="constant",
+                constant_values=0,
+            )
+            value = np.pad(
+                sub_df[[c for c in sub_df.columns if c.startswith("Value_")]].values,
+                ((0, max_length - len(sub_df)), (0, 0)),
+                mode="constant",
+                constant_values=0,
+            )
+            label = sub_df[["y_0", "y_1", "y_2", "y_3"]].values[0]
+            time = np.pad(
+                sub_df["Time"].values,
+                (0, max_length - len(sub_df)),
+                mode="constant",
+                constant_values=0,
+            )
 
+            item = {
+                "ID": id,
+                "Mask": mask,
+                "Value": value,
+                "Label": label,
+                "Times": time,
+            }
+            patient_data.append(item)
 
-## create 3D tensor
-def create_tensor(
-    features, padding_value=0, max_length=None, padding="pre", truncating="pre"
-):
-    """
-    Pads sequences to the same length.
+        data[i] = patient_data
 
-    Args:
-        features: list of 2D sequences (time x variables)
-        padding_value: padding value
-        max_length: maximum length of all sequences.
-                    If not provided, sequences will be padded to the
-                    length of the longest individual sequence
-        padding: String, 'pre' or 'post', pad either before or after each sequence.
-        truncating: String, 'pre' or 'post' remove values from sequences larger than maxlen,
-                    either at the beginning or at the end of the sequences.
-
-    Returns:
-        padded_tensor: PyTorch tensor with sequences padded to the same length.
-    """
-
-    # Convert input features to tensors
-    tensor_features = [torch.tensor(f, dtype=torch.float32) for f in features]
-
-    # Truncate sequences that exceed max_length
-    if max_length:
-        if truncating == "pre":
-            tensor_features = [f[-max_length:] for f in tensor_features]
-        else:
-            tensor_features = [f[:max_length] for f in tensor_features]
-
-    return tensor_features
-
-    # Use pad_sequence for easy padding
-    if padding == "pre":
-        padded_tensor = pad_sequence(
-            tensor_features, batch_first=True, padding_value=padding_value
-        )
-    else:
-        tensor_features = [
-            f.flip([0]) for f in tensor_features
-        ]  # Reverse for 'post' padding
-        padded_tensor = pad_sequence(
-            tensor_features, batch_first=True, padding_value=padding_value
-        )
-        padded_tensor = padded_tensor.flip([1])  # Reverse back after padding
-
-    return padded_tensor
+    return data["train"], data["val"], data["test"]
