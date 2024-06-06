@@ -1,25 +1,10 @@
+import os
 import torch
-from torch import nn
-from torch.utils.data import DataLoader, TensorDataset, Subset
-from torch.nn.utils import weight_norm
-import torch.optim as optim
-import torch.nn.functional as F
 from tqdm import tqdm
 
-import numpy as np
-from sklearn.metrics import accuracy_score
-from sklearn.metrics import confusion_matrix
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import roc_auc_score
-from sklearn.metrics import roc_curve
-from sklearn.metrics import precision_recall_curve
-from sklearn.metrics import auc
-from sklearn.metrics import average_precision_score
-from sklearn.metrics import recall_score
-from sklearn.metrics import precision_score, f1_score
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
+# print(f"\n\nDEVICE: {device}\n\n")
 
 def train_model(
     train_loader,
@@ -30,9 +15,16 @@ def train_model(
     num_epochs,
     MB_NUM,
     batch_size,
+    device,
+    outcome
 ):
     best_val_loss = float("inf")
     best_model_state = None
+    optimizer_name = os.getenv("OPTIM")
+
+    epoch_to_save = 5
+
+    losses = []
 
     for epoch in range(num_epochs):
         model.train()
@@ -53,10 +45,10 @@ def train_model(
             )
 
             optimizer.zero_grad()
-            outputs = model(inputs, masks, active_branch=active_branch)
+            outputs = model(inputs.to(device), masks.to(device), active_branch=active_branch)
             final_outputs = torch.mean(outputs, dim=0)
 
-            loss = criterion(final_outputs.float(), labels.float())
+            loss = criterion(final_outputs.float(), labels.to(device).float())
 
             loss.backward()
             optimizer.step()
@@ -66,9 +58,28 @@ def train_model(
 
         val_loss = evaluate_model(val_loader, model, criterion, MB_NUM, device)
 
+        losses.append({
+            "Train": avg_train_loss,
+            "Validation": val_loss
+        })
+
         print(
             f"Epoch {epoch + 1}/{num_epochs} - Train Loss: {avg_train_loss:.4f} - Val Loss: {val_loss:.4f}\n"
         )
+
+        if (epoch + 1) % epoch_to_save == 0:
+            folder = f"mbtcn_{outcome}_{optimizer_name}"
+            os.makedirs(folder, exist_ok=True)
+            model_path = os.path.join(folder, f"model_{epoch + 1}.pt")
+            torch.save(
+                {
+                    "epoch": epoch + 1,
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "losses": losses,
+                },
+                model_path,
+            )
 
 
 def evaluate_model(data_loader, model, criterion, MB_NUM, device):
@@ -88,6 +99,7 @@ def evaluate_model(data_loader, model, criterion, MB_NUM, device):
             )
             inputs = torch.nan_to_num(inputs).to(device)
             labels = labels.to(device)
+            masks = masks.to(device)
 
             outputs = model(inputs, masks, active_branch=active_branch)
             final_outputs = torch.mean(outputs, dim=0)

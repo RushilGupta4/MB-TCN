@@ -10,7 +10,12 @@ import torch
 from torch import nn
 import torch.optim as optim
 import torch.nn.functional as F
+import os
 
+
+
+outcome = os.getenv("OUTCOME")
+is_adam_optimizer = os.getenv("OPTIM") == "adam"
 
 device_name = "cuda" if torch.cuda.is_available() else "cpu"
 # device_name = "mps"
@@ -22,6 +27,8 @@ print("Numpy Version:", np.__version__)
 print("Pandas Version:", pd.__version__)
 print("Sklearn Version:", sklearn.__version__)
 
+torch.cuda.empty_cache()
+
 
 if device_name == "cuda":
     print("===========================================")
@@ -30,20 +37,22 @@ if device_name == "cuda":
     print("Device Information:", torch.cuda.get_device_name(0))
 
 
-train_df, val_df, test_df = load_data(column="death_time")
+train_df, val_df, test_df, n_outputs = load_data(column=outcome)
+
 
 train_dataset = PatientDataset(train_df)
 val_dataset = PatientDataset(val_df)
 
 
+num_inputs = 256
 num_inputs = 1097
 num_channels = [16, 16]
-n_outputs = 4
+# n_outputs = 3
 n_branches = 10
 kernel_size = 10
 dropout = 0.4
 batch_size = 128
-batch_size = 4
+batch_size = 32
 
 
 train_loader = torch.utils.data.DataLoader(
@@ -63,7 +72,10 @@ model = MBTCN(
 ).to(device)
 
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters())
+if is_adam_optimizer:
+    optimizer = optim.Adam(model.parameters())
+else:
+    optimizer = optim.SGD(model.parameters(), momentum=0.9)
 
 
 train_loader = torch.utils.data.DataLoader(
@@ -74,7 +86,7 @@ val_loader = torch.utils.data.DataLoader(
 )
 
 # Training the model
-num_epochs = 500
+num_epochs = 100
 train_model(
     train_loader=train_loader,
     val_loader=val_loader,
@@ -84,4 +96,6 @@ train_model(
     num_epochs=num_epochs,
     MB_NUM=n_branches,
     batch_size=batch_size,
+    device=device,
+    outcome=outcome
 )
